@@ -283,3 +283,190 @@ function severe(q){
   for(var i=0;i<SEVERE.length;i++){ try{ if(SEVERE[i].test(q)) return SEVERE[i]; }catch(e){} }
   return null;
 }
+
+/* ---------- batch questionnaire: upload a file of questions, get all answers, download Markdown ---------- */
+var BATCH_MAX = 25;
+var BATCH_NOTE = "(הערה פנימית, לא לציטוט: הסטודנט.ית שלח.ה שאלון מוכן מראש, ואתה עונה עליו שאלה אחר שאלה, כמו בריאיון רציף. אין להם אפשרות לענות לך: אל תשאל שאלות הבהרה ואל תסיים בשאלה אליהם. אם השאלה עמומה, ענה לפי הפירוש הסביר ואמור בחצי משפט באיזה פירוש בחרת. אל תפתח בהיכרות, אל תשאל לשם ואל תיפרד. ";
+function batchKey(p){ return "si:batch:"+p.id; }
+function loadBatch(p){ try{ var o = JSON.parse(localStorage.getItem(batchKey(p))||"null"); if(o && Array.isArray(o.items)) return o; }catch(e){} return {items:[]}; }
+function saveBatch(p, b){ try{ b.updated = Date.now(); localStorage.setItem(batchKey(p), JSON.stringify(b)); }catch(e){} }
+function parseQuestions(text){
+  var seen = {}, out = [];
+  String(text||"").replace(/\r/g,"").split(/\n+/).forEach(function(line){
+    var q = line.replace(/^﻿/,"").trim().replace(/^["']|["']$/g,"").trim();
+    if(!q || /^#/.test(q)) return;
+    q = q.replace(/^\(?\d{1,3}\s*[.)\-:]\)?\s*/,"").replace(/^[-*•–]\s*/,"").replace(/^ש(אלה)?\s*\d{1,3}\s*[:.)]\s*/,"").trim();
+    if(q.length < 4 || seen[q]) return;
+    seen[q] = 1; out.push(q);
+  });
+  return out;
+}
+var JSZIP_SRC = "https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js";
+var jszipP = null;
+function loadJSZip(){
+  if(window.JSZip) return Promise.resolve(window.JSZip);
+  if(!jszipP) jszipP = new Promise(function(res, rej){
+    var sc = document.createElement("script"); sc.src = JSZIP_SRC; sc.async = true;
+    sc.onload = function(){ window.JSZip ? res(window.JSZip) : rej(new Error("lib")); };
+    sc.onerror = function(){ jszipP = null; rej(new Error("lib")); };
+    document.head.appendChild(sc);
+  });
+  return jszipP;
+}
+function docxText(file){
+  return loadJSZip().then(function(Z){ return Z.loadAsync(file); }).then(function(zip){
+    var f = zip.file("word/document.xml"); if(!f) throw new Error("format");
+    return f.async("string");
+  }).then(function(xml){
+    var dec = function(s){ return s.replace(/&lt;/g,"<").replace(/&gt;/g,">").replace(/&quot;/g,'"').replace(/&apos;/g,"'").replace(/&amp;/g,"&"); };
+    return xml.split(/<\/w:p>/).map(function(par){
+      var t = ""; par.replace(/<w:t(?:\s[^>]*)?>([\s\S]*?)<\/w:t>/g, function(_, x){ t += x; return ""; });
+      return dec(t);
+    }).join("\n");
+  });
+}
+function readQuestionFile(file){
+  var name = (file.name||"").toLowerCase();
+  if(file.size > 1024*1024) return Promise.reject(new Error("size"));
+  if(/\.docx$/.test(name)) return docxText(file);
+  if(/\.(txt|md|markdown|csv|tsv)$/.test(name) || /^text\//.test(file.type||"")) return file.text();
+  return Promise.reject(new Error("format"));
+}
+function batchMarkdown(p, b, student){
+  var done = b.items.filter(function(it){ return it.a; }).length;
+  var out = ["# שאלון סינתטי עם "+p.name, "", "מראיין.ת: "+student+"  |  "+heDate()+"  |  "+done+" מתוך "+b.items.length+" שאלות נענו", "",
+    "> זהו ריאיון סינתטי מבוסס AI, שנבנה מפרופיל מחקרי של "+(p.kind==="manager" ? "דמות בדיונית" : g(p,"היוצר","היוצרת"))+". התשובות אינן ציטוטים אמיתיים. השאלון נשלח כקובץ, והתשובות נוצרו ברצף בלי שאלות הבהרה.", ""];
+  b.items.forEach(function(it, i){
+    out.push("## שאלה "+(i+1), "", "**"+it.q.replace(/\n+/g," ")+"**", "");
+    if(it.flag){ var c = SEVERE.filter(function(x){ return x.id===it.flag; })[0]; if(c) out.push("> **טיפ מערכת: "+c.label+".** "+c.why+" איך לתקן: "+c.fix+" לדוגמה: "+c.ex, ""); }
+    out.push("**"+p.name+":**", "", it.a || "(לא התקבלה תשובה)", "");
+  });
+  return out.join("\n");
+}
+function batchTool(p, getNameInput){
+  var b = loadBatch(p), busy = false, ctl = null;
+  var fileIn = el("input",{type:"file",id:"batch-file-"+p.id,accept:".txt,.md,.markdown,.csv,.docx,text/plain,text/markdown",class:"sr"});
+  var paste = el("textarea",{rows:"4",placeholder:"או הדביקו כאן את השאלות, שאלה בכל שורה","aria-label":"השאלות, שאלה בכל שורה"});
+  var status = el("p",{class:"muted",role:"status","aria-live":"polite"});
+  var list = el("ol",{class:"batch-list"});
+  var runBtn = el("button",{type:"button",class:"ex-btn batch-run"},["להריץ"]);
+  var mdBtn = el("button",{type:"button",class:"ex-btn"},["הורדת קובץ Markdown"]);
+  var clearBtn = el("button",{type:"button",class:"btn-ghost"},["שאלון חדש"]);
+  var dlStatus = el("p",{class:"ex-status",role:"status","aria-live":"polite"});
+  var actions = el("div",{class:"batch-actions"},[runBtn, mdBtn, clearBtn]);
+
+  function setItems(qs){
+    var extra = qs.length > BATCH_MAX ? qs.length - BATCH_MAX : 0;
+    qs = qs.slice(0, BATCH_MAX);
+    b = {items: qs.map(function(q){ var f = severe(q); return {q:q, a:"", flag: f ? f.id : ""}; })};
+    saveBatch(p, b); draw();
+    status.textContent = qs.length ? ("נטענו "+qs.length+" שאלות."+(extra ? " "+extra+" שאלות נוספות לא נכנסו: אפשר עד "+BATCH_MAX+" בכל שאלון." : "")) : "לא נמצאו שאלות. כתבו שאלה בכל שורה.";
+  }
+  function draw(){
+    var pending = b.items.filter(function(it){ return !it.a; }).length, answered = b.items.length - pending;
+    list.replaceChildren.apply(list, b.items.map(function(it, i){
+      var c = it.flag ? SEVERE.filter(function(x){ return x.id===it.flag; })[0] : null;
+      return el("li",{class:"batch-item"},[
+        el("p",{class:"batch-q text",text:it.q}),
+        c ? el("p",{class:"batch-flag"},[el("span",{class:"sf-ic","aria-hidden":"true",text:"!"}), "טיפ מערכת: "+c.label+". "+c.fix]) : null,
+        it.a ? el("div",{class:"batch-a"},[speaker(p), el("p",{class:"text",text:it.a})])
+             : el("p",{class:"muted",text: it.err ? it.err : (busy && it===current ? p.short+" "+g(p,"עונה","עונה")+"..." : "ממתינה לתשובה")})
+      ]);
+    }));
+    var has = b.items.length > 0;
+    actions.hidden = !has;
+    runBtn.textContent = busy ? "עצירה" : (answered && pending ? "להמשיך ("+pending+" שאלות נותרו)" : pending ? "לשלוח ל"+p.short+" ("+pending+" שאלות)" : "כל השאלות נענו");
+    runBtn.disabled = !busy && !pending;
+    runBtn.classList.toggle("stop", busy);
+    mdBtn.disabled = busy || !answered;
+    clearBtn.disabled = busy;
+  }
+  var current = null;
+  function run(){
+    if(busy){ if(ctl) ctl.abort(); return; }
+    var todo = b.items.filter(function(it){ return !it.a; });
+    if(!todo.length) return;
+    busy = true; ctl = new AbortController(); var myCtl = ctl, fatal = null, stopped = false;
+    draw();
+    getSample().then(function(sample){
+      if(!sample) throw {code:"unavailable"};
+      function next(){
+        if(stopped || fatal) return Promise.resolve();
+        var idx = b.items.findIndex(function(it){ return !it.a && !it.tried; });
+        if(idx < 0) return Promise.resolve();
+        var it = b.items[idx]; current = it; it.tried = true; it.err = "";
+        status.textContent = "עונה על שאלה "+(idx+1)+" מתוך "+b.items.length+"...";
+        draw();
+        var hist = [];
+        b.items.slice(0, idx).forEach(function(x){ if(x.a){ hist.push({role:"user", content:x.q}); hist.push({role:"assistant", content:x.a}); } });
+        hist.push({role:"user", content:it.q});
+        var note = BATCH_NOTE + "זו שאלה "+(idx+1)+" מתוך "+b.items.length+".)\n\n";
+        return sample(buildInput(p, hist, note), {cache:false, signal:myCtl.signal}).then(function(res){
+          it.a = tidy(res.text||"");
+        }).catch(function(e){
+          var code = e && e.code;
+          if(code==="cancelled"){ stopped = true; it.tried = false; return; }
+          if(code==="not_granted" || code==="unavailable" || code==="sampling_disabled" || code==="rate_limited" || code==="session_expired" || code==="capability_disabled" || code==="not_declared"){ fatal = code; it.tried = false; return; }
+          if(e && e.text){ it.a = tidy(e.text); return; }
+          it.err = "לא התקבלה תשובה לשאלה הזו. אפשר להריץ שוב בסוף.";
+        }).then(function(){ saveBatch(p, b); draw(); return next(); });
+      }
+      return next();
+    }).catch(function(e){ fatal = (e && e.code) || "error"; }).then(function(){
+      busy = false; ctl = null; current = null;
+      b.items.forEach(function(it){ delete it.tried; });
+      saveBatch(p, b); draw();
+      var left = b.items.filter(function(it){ return !it.a; }).length;
+      if(fatal) status.textContent = sampleErrorText(fatal);
+      else if(stopped) status.textContent = "השאלון נעצר. התשובות שהתקבלו נשמרו, ואפשר להמשיך.";
+      else status.textContent = left ? ("הסתיים. "+left+" שאלות לא נענו, ואפשר להריץ אותן שוב.") : "כל השאלות נענו. אפשר להוריד את הקובץ.";
+    });
+  }
+  function download(){
+    var nameIn = getNameInput(), student = nameIn ? nameIn.value.trim() : getStudentName();
+    if(!student){
+      dlStatus.classList.add("bad"); dlStatus.textContent = "כתבו את השם שלכם בשדה 'שמירת הריאיון' למטה, ואז הורידו.";
+      if(nameIn){ nameIn.setAttribute("aria-invalid","true"); nameIn.focus(); }
+      return;
+    }
+    var md = batchMarkdown(p, b, student), fname = "שאלון-"+p.short+"-"+fileSafe(student)+"-"+today()+".md";
+    dlStatus.classList.remove("bad"); dlStatus.textContent = "מכין את הקובץ...";
+    getDownloads().then(function(dl){
+      if(!dl) throw {code:"unavailable"};
+      dlStatus.textContent = "אשרו את השמירה בחלון שנפתח.";
+      return dl.save({filename:fname, data:md});
+    }).then(function(){ dlStatus.textContent = "הקובץ נשמר."; }).catch(function(e){
+      var code = e && e.code;
+      if(code==="declined"){ dlStatus.textContent = "השמירה בוטלה."; return; }
+      dlStatus.classList.add("bad");
+      if(code==="rate_limited") dlStatus.textContent = "חלון שמירה כבר פתוח. סגרו אותו ונסו שוב.";
+      else dlStatus.replaceChildren("שמירת קבצים לא זמינה כאן. ", el("button",{type:"button",onclick:function(){ copyText(md, dlStatus); }},["העתקת השאלון והתשובות"]));
+    });
+  }
+  fileIn.addEventListener("change", function(){
+    var f = fileIn.files && fileIn.files[0]; fileIn.value = ""; if(!f || busy) return;
+    status.textContent = "קורא את הקובץ...";
+    readQuestionFile(f).then(function(text){ setItems(parseQuestions(text)); }).catch(function(e){
+      status.textContent = e && e.message==="size" ? "הקובץ גדול מדי. אפשר עד 1MB." :
+        e && e.message==="lib" ? "לא הצלחנו לקרוא קובץ Word כאן. שמרו אותו כ-txt, או העתיקו את השאלות לתיבה." :
+        "אפשר להעלות קובץ txt, md או docx. אפשר גם להדביק את השאלות בתיבה.";
+    });
+  });
+  runBtn.addEventListener("click", run);
+  mdBtn.addEventListener("click", download);
+  clearBtn.addEventListener("click", function(){ if(busy) return; b = {items:[]}; saveBatch(p, b); status.textContent = ""; dlStatus.textContent = ""; draw(); });
+  draw();
+  if(b.items.length) status.textContent = "השאלון האחרון שלכם עם "+p.short+" נשמר בדפדפן הזה.";
+
+  return el("details",{class:"tool",id:"tool-batch"},[
+    el("summary",null,[el("span",{class:"tool-t",text:"העלאת שאלון"}), el("span",{class:"tool-why",text:"מעלים קובץ עם כל השאלות, "+p.short+" "+g(p,"עונה","עונה")+" על כולן ברצף, ומורידים קובץ Markdown עם השאלות והתשובות."})]),
+    el("div",{class:"tool-body"},[
+      el("p",{text:"קובץ txt, md או docx, שאלה בכל שורה. אפשר עד "+BATCH_MAX+" שאלות. "+p.short+" "+g(p,"עונה","עונה")+" ברצף, כמו בריאיון אחד, אבל בלי שאלות הבהרה, כי אי אפשר לענות לו באמצע. התשובות לא נכנסות לשיחה החיה."}),
+      el("p",{class:"warn-note",text:"כל שאלה היא תשובה נפרדת מ-Claude בחשבון שלכם, אחת אחרי השנייה. 12 שאלות לוקחות כמה דקות. שאלה שהמערכת הייתה עוצרת בריאיון החי תיענה, אבל תסומן בטיפ."}),
+      el("div",{class:"batch-in"},[el("label",{for:"batch-file-"+p.id,class:"ex-btn file-btn",text:"בחירת קובץ"}), fileIn]),
+      paste,
+      el("button",{type:"button",class:"ex-btn",onclick:function(){ if(!busy) setItems(parseQuestions(paste.value)); }},["לטעון את השאלות מהתיבה"]),
+      status, list, actions, dlStatus
+    ])
+  ]);
+}

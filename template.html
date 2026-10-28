@@ -216,6 +216,20 @@ main.interview{padding-block:20px 12px}
 .tool-t{font-weight:600}
 .tool-why{color:var(--muted);font-size:14px}
 .tool-body{padding:0 14px 14px;display:grid;gap:10px}
+.batch-in{display:flex;gap:10px;align-items:center}
+.batch-list{margin:0;padding-inline-start:22px;display:grid;gap:14px}
+.batch-list:empty{display:none}
+.batch-item{display:grid;gap:6px}
+.batch-q{font-weight:700;font-size:16px}
+.batch-a{background:var(--ground);border-inline-start:4px solid var(--accent);border-radius:10px;padding:10px 14px}
+.batch-a .speaker{font-size:16px;margin-bottom:4px}
+.batch-a .text{font-size:16px;line-height:1.7}
+.batch-flag{display:flex;gap:8px;align-items:flex-start;font-size:14px;color:var(--ink);background:color-mix(in srgb,var(--danger) 9%,var(--surface));border-inline-start:4px solid var(--danger);border-radius:8px;padding:6px 10px}
+.batch-flag .sf-ic{flex:none;display:inline-grid;place-items:center;width:18px;height:18px;border-radius:50%;background:var(--danger);color:var(--ground);font-size:12px;font-weight:900;margin-top:3px}
+.batch-actions{display:flex;flex-wrap:wrap;gap:8px 12px;align-items:center}
+.batch-actions[hidden]{display:none}
+.ex-btn.stop{background:transparent;border-color:var(--ink)}
+.ex-btn:disabled{opacity:.5;cursor:not-allowed}
 .tool-body textarea{width:100%;font:inherit;color:var(--ink);background:var(--ground);border:1px solid var(--line-strong);border-radius:8px;padding:8px 10px;line-height:1.55;unicode-bidi:plaintext}
 .qn-list{margin:0;padding-inline-start:22px;display:grid;gap:8px}
 .qn-row{display:flex;gap:10px;align-items:flex-start;justify-content:space-between}
@@ -705,6 +719,7 @@ function renderInterview(p){
         el("p",{class:"muted"},[el("a",{href:"#compare",text:"להשוואת השאלון בין כמה יוצרים ←"})])
       ])
     ]),
+    batchTool(p, function(){ return document.getElementById("student-name"); }),
     screenTool
   ]);
 
